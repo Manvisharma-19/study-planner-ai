@@ -6,7 +6,7 @@ import PyPDF2
 import json
 import re
 from datetime import date, datetime
-import google.generativeai as genai
+from groq import Groq
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -18,9 +18,10 @@ st.set_page_config(
 
 # ── Gemini setup ──────────────────────────────────────────────────────────────
 try:
-    genai.configure(api_key=st.secrets["gemini"]["api_key"])
+    groq_client = Groq(api_key=st.secrets["groq"]["api_key"])
     GEMINI_OK = True
 except Exception:
+    groq_client = None
     GEMINI_OK = False
 
 # ── Styles ────────────────────────────────────────────────────────────────────
@@ -314,12 +315,15 @@ def extract_pdf_text(uploaded_file) -> tuple[str, str | None]:
 
 
 def call_gemini(prompt: str) -> tuple[str, str | None]:
-    if not GEMINI_OK:
-        return "", "Gemini API key not set. Add it to Streamlit secrets."
+    if not GEMINI_OK or groq_client is None:
+        return "", "Groq API key not set. Add it to Streamlit secrets."
     try:
-        model    = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
-        return response.text.strip(), None
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4000,
+        )
+        return response.choices[0].message.content.strip(), None
     except Exception as e:
         return "", str(e)
 
