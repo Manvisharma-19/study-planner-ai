@@ -317,7 +317,7 @@ def call_gemini(prompt: str) -> tuple[str, str | None]:
     if not GEMINI_OK:
         return "", "Gemini API key not set. Add it to Streamlit secrets."
     try:
-        model    = genai.GenerativeModel("gemini-1.5-flash")
+        model    = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
         return response.text.strip(), None
     except Exception as e:
