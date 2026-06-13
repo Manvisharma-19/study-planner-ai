@@ -302,16 +302,35 @@ if not st.session_state.logged_in:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def extract_pdf_text(uploaded_file) -> tuple[str, str | None]:
+    import io
+    # Try pdfplumber first (handles more PDF types)
     try:
+        import pdfplumber
+        file_bytes = uploaded_file.read()
+        uploaded_file.seek(0)
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            text = "\n".join(
+                page.extract_text() or "" for page in pdf.pages
+            ).strip()
+        if len(text) > 30:
+            return text, None
+    except Exception:
+        pass
+
+    # Fallback to PyPDF2
+    try:
+        import PyPDF2
+        uploaded_file.seek(0)
         reader = PyPDF2.PdfReader(uploaded_file)
         text   = "\n".join(
             p.extract_text() or "" for p in reader.pages
         ).strip()
-        if len(text) < 30:
-            return "", "PDF seems empty or image-only. Please use a text-based PDF."
-        return text, None
-    except Exception as e:
-        return "", str(e)
+        if len(text) > 30:
+            return text, None
+    except Exception:
+        pass
+
+    return "", "Could not read this PDF. It may be a scanned/image PDF. Please use a text-based PDF."
 
 
 def call_gemini(prompt: str) -> tuple[str, str | None]:
