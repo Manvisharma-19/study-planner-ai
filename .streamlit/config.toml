@@ -4,5 +4,3 @@ backgroundColor = "#0f0f1a"
 secondaryBackgroundColor = "#1a1a2e"
 textColor = "#ffffff"
 font = "sans serif"
-[gemini]
-api_key = "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"
