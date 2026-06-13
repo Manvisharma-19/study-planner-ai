@@ -3,3 +3,5 @@ numpy
 scikit-learn
 matplotlib
 streamlit
+google-generativeai
+PyPDF2

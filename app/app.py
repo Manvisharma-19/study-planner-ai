@@ -2,155 +2,248 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import streamlit as st
-import pandas as pd
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import warnings
-import smtplib
+import PyPDF2
 import json
-import random
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-warnings.filterwarnings("ignore")
+import re
+from datetime import date, datetime
+import google.generativeai as genai
 
-from src.data_pipeline        import run_pipeline
-from src.feature_engineering  import engineer_features, FEATURE_COLS
-from src.planner              import Subject, StudyPlanner
-from src.performance_model    import train_regression, train_classification
-
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="StudyAI — Smart Planner",
+    page_title="StudyAI",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# ── Gemini setup ──────────────────────────────────────────────────────────────
+try:
+    genai.configure(api_key=st.secrets["gemini"]["api_key"])
+    GEMINI_OK = True
+except Exception:
+    GEMINI_OK = False
+
+# ── Styles ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
 * { font-family: 'Inter', sans-serif; }
-.stApp { background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%); }
+
+.stApp {
+    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+    min-height: 100vh;
+}
+
 section[data-testid="stSidebar"] {
-    background: linear-gradient(180deg, #1a1a2e 0%, #16213e 100%) !important;
-    border-right: 1px solid rgba(79,110,245,0.3);
+    background: linear-gradient(180deg, #0f0f1a 0%, #1a1a2e 100%) !important;
+    border-right: 1px solid rgba(79,110,245,0.2);
 }
-.hero-section {
-    background: linear-gradient(135deg, rgba(79,110,245,0.15), rgba(108,62,232,0.15));
-    border: 1px solid rgba(79,110,245,0.3);
-    border-radius: 20px; padding: 2.5rem; margin-bottom: 2rem; text-align: center;
+
+.hero {
+    background: linear-gradient(135deg, rgba(79,110,245,0.12), rgba(108,62,232,0.12));
+    border: 1px solid rgba(79,110,245,0.25);
+    border-radius: 24px;
+    padding: 3rem 2rem;
+    text-align: center;
+    margin-bottom: 2rem;
 }
+
 .hero-title {
-    font-size: 2.8rem; font-weight: 800;
+    font-size: 3rem;
+    font-weight: 800;
     background: linear-gradient(135deg, #4F6EF5, #a78bfa, #6EE7B7);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 0.5rem;
 }
-.hero-sub { color: rgba(255,255,255,0.6); font-size: 1rem; }
-.kpi-card {
-    background: linear-gradient(135deg, rgba(79,110,245,0.1), rgba(108,62,232,0.1));
-    border: 1px solid rgba(79,110,245,0.25); border-radius: 16px;
-    padding: 1.5rem; text-align: center;
+
+.hero-sub {
+    color: rgba(255,255,255,0.5);
+    font-size: 1.1rem;
 }
-.kpi-number { font-size: 2.4rem; font-weight: 800; color: #4F6EF5; line-height: 1; }
-.kpi-label { font-size: 0.75rem; color: rgba(255,255,255,0.5);
-             text-transform: uppercase; letter-spacing: 0.1em; margin-top: 0.4rem; }
-.subject-card {
-    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 16px; padding: 1.25rem 1.5rem; margin-bottom: 0.75rem;
+
+.card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px;
+    padding: 1.75rem;
+    margin-bottom: 1.25rem;
 }
-.subject-card:hover { border-color: rgba(79,110,245,0.4); }
-.badge-risk {
-    background: rgba(239,68,68,0.2); color: #f87171;
-    border: 1px solid rgba(239,68,68,0.3);
-    padding: 3px 12px; border-radius: 99px; font-size: 0.75rem; font-weight: 600;
+
+.card-blue {
+    background: rgba(79,110,245,0.06);
+    border: 1px solid rgba(79,110,245,0.2);
+    border-radius: 20px;
+    padding: 1.75rem;
+    margin-bottom: 1.25rem;
 }
-.badge-safe {
-    background: rgba(110,231,183,0.15); color: #6EE7B7;
-    border: 1px solid rgba(110,231,183,0.3);
-    padding: 3px 12px; border-radius: 99px; font-size: 0.75rem; font-weight: 600;
-}
+
 .section-title {
-    font-size: 1.3rem; font-weight: 700; color: white;
-    margin: 1.5rem 0 1rem; padding-left: 0.75rem;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: white;
+    margin: 1.5rem 0 1rem;
+    padding-left: 0.75rem;
     border-left: 4px solid #4F6EF5;
 }
-.schedule-day {
-    background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 0.5rem;
+
+.tip {
+    background: rgba(110,231,183,0.08);
+    border: 1px solid rgba(110,231,183,0.2);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    color: #6EE7B7;
+    font-size: 0.9rem;
+    margin: 0.75rem 0;
 }
-.pred-result {
-    background: linear-gradient(135deg, rgba(79,110,245,0.15), rgba(110,231,183,0.1));
-    border: 1px solid rgba(79,110,245,0.3);
-    border-radius: 20px; padding: 2rem; text-align: center; margin: 1rem 0;
+
+.warn {
+    background: rgba(239,68,68,0.08);
+    border: 1px solid rgba(239,68,68,0.2);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    color: #f87171;
+    font-size: 0.9rem;
+    margin: 0.75rem 0;
 }
-.pred-score-big {
-    font-size: 4rem; font-weight: 800;
+
+.info-box {
+    background: rgba(79,110,245,0.08);
+    border: 1px solid rgba(79,110,245,0.2);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    color: #a78bfa;
+    font-size: 0.9rem;
+    margin: 0.75rem 0;
+}
+
+.day-card {
+    background: rgba(79,110,245,0.06);
+    border: 1px solid rgba(79,110,245,0.15);
+    border-left: 4px solid #4F6EF5;
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 0.6rem;
+}
+
+.mcq-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    padding: 1.25rem;
+    margin-bottom: 0.75rem;
+}
+
+.score-big {
+    font-size: 4rem;
+    font-weight: 800;
+    text-align: center;
     background: linear-gradient(135deg, #4F6EF5, #6EE7B7);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
 }
-.tip-box {
-    background: rgba(110,231,183,0.08); border: 1px solid rgba(110,231,183,0.25);
-    border-radius: 12px; padding: 1rem 1.25rem; margin: 1rem 0;
-    color: #6EE7B7; font-size: 0.9rem;
+
+.upload-box {
+    background: rgba(79,110,245,0.04);
+    border: 2px dashed rgba(79,110,245,0.3);
+    border-radius: 16px;
+    padding: 2.5rem;
+    text-align: center;
+    margin: 1rem 0;
 }
-.warning-box {
-    background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25);
-    border-radius: 12px; padding: 1rem 1.25rem; margin: 1rem 0;
-    color: #f87171; font-size: 0.9rem;
-}
-.quiz-card {
-    background: rgba(79,110,245,0.08); border: 1px solid rgba(79,110,245,0.2);
-    border-radius: 16px; padding: 1.5rem; margin-bottom: 1rem;
-}
-.syllabus-topic {
-    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.5rem;
-    display: flex; align-items: center; gap: 0.75rem;
-}
+
 .stButton > button {
     background: linear-gradient(135deg, #4F6EF5, #6C3EE8) !important;
-    color: white !important; border: none !important;
-    border-radius: 10px !important; font-weight: 600 !important;
-    transition: all 0.3s ease !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 12px !important;
+    font-weight: 600 !important;
+    font-size: 0.95rem !important;
+    padding: 0.65rem 1.5rem !important;
+    transition: all 0.2s ease !important;
+    width: 100% !important;
 }
+
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 6px 20px rgba(79,110,245,0.35) !important;
+}
+
+.stTextInput > div > div > input,
+.stTextArea textarea,
+.stSelectbox > div > div {
+    background: rgba(255,255,255,0.05) !important;
+    border: 1px solid rgba(79,110,245,0.25) !important;
+    border-radius: 10px !important;
+    color: white !important;
+}
+
 .stTabs [data-baseweb="tab-list"] {
     background: rgba(255,255,255,0.03) !important;
-    border-radius: 12px !important; padding: 4px !important;
-    border: 1px solid rgba(255,255,255,0.08) !important; gap: 4px !important;
+    border-radius: 14px !important;
+    padding: 4px !important;
+    border: 1px solid rgba(255,255,255,0.07) !important;
+    gap: 4px !important;
 }
+
 .stTabs [data-baseweb="tab"] {
-    border-radius: 8px !important;
-    color: rgba(255,255,255,0.5) !important; font-weight: 500 !important;
+    border-radius: 10px !important;
+    color: rgba(255,255,255,0.45) !important;
+    font-weight: 500 !important;
+    padding: 8px 18px !important;
 }
+
 .stTabs [aria-selected="true"] {
     background: linear-gradient(135deg, #4F6EF5, #6C3EE8) !important;
     color: white !important;
 }
-div[data-testid="stMetricValue"] { color: #4F6EF5 !important; font-weight: 700 !important; }
+
+.stProgress > div > div {
+    background: linear-gradient(90deg, #4F6EF5, #6EE7B7) !important;
+    border-radius: 99px !important;
+}
+
+div[data-testid="stMetricValue"] {
+    color: #4F6EF5 !important;
+    font-weight: 700 !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
 
-# ── Session state ─────────────────────────────────────────────────────────────
-for key, val in {
-    "logged_in": False, "username": "", "email": "",
-    "page": "login", "subjects": [], "syllabus": {},
-    "quiz_score": 0, "quiz_total": 0, "reminder_sent": False,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
+# ══════════════════════════════════════════════════════════════════════════════
+# SESSION STATE
+# ══════════════════════════════════════════════════════════════════════════════
+defaults = {
+    "logged_in":    False,
+    "username":     "",
+    "email":        "",
+    "page":         "login",
+    "study_plans":  {},   # {subject: plan_text}
+    "quiz_state":   {},   # quiz state
+    "summary":      "",   # last PDF summary
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
-# ── AUTH ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTH
+# ══════════════════════════════════════════════════════════════════════════════
 if not st.session_state.logged_in:
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
+    _, col, _ = st.columns([1, 1.6, 1])
+    with col:
         st.markdown("""
-        <div style='text-align:center; padding:2rem 0 1rem'>
-            <div style='font-size:3rem'>🎓</div>
-            <h1 style='color:white;font-weight:800;margin:0'>StudyAI</h1>
-            <p style='color:rgba(255,255,255,0.4);margin:0'>Your intelligent study companion</p>
+        <div style='text-align:center;padding:2.5rem 0 1.5rem'>
+            <div style='font-size:3.5rem'>🎓</div>
+            <h1 style='color:white;font-weight:800;font-size:2.2rem;margin:0.25rem 0'>
+                StudyAI
+            </h1>
+            <p style='color:rgba(255,255,255,0.35);margin:0;font-size:0.95rem'>
+                AI-powered exam preparation
+            </p>
         </div>""", unsafe_allow_html=True)
 
         t1, t2 = st.columns(2)
@@ -164,10 +257,15 @@ if not st.session_state.logged_in:
         st.markdown("<br>", unsafe_allow_html=True)
 
         if st.session_state.page == "login":
-            st.markdown("<h3 style='color:white;text-align:center'>Welcome back 👋</h3>",
-                        unsafe_allow_html=True)
-            email = st.text_input("📧 Email", placeholder="you@example.com")
-            passw = st.text_input("🔒 Password", type="password")
+            st.markdown(
+                "<h3 style='color:white;text-align:center;font-size:1.4rem'>"
+                "Welcome back 👋</h3>",
+                unsafe_allow_html=True)
+            email = st.text_input("📧 Email", placeholder="you@example.com",
+                                   key="li_email")
+            passw = st.text_input("🔒 Password", type="password",
+                                   key="li_pass")
+            st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Login →", use_container_width=True):
                 if email and passw:
                     st.session_state.logged_in = True
@@ -179,13 +277,14 @@ if not st.session_state.logged_in:
             st.caption("Demo: any email + password works")
 
         else:
-            st.markdown("<h3 style='color:white;text-align:center'>Create Account ✨</h3>",
-                        unsafe_allow_html=True)
-            name  = st.text_input("👤 Full Name")
-            email = st.text_input("📧 Email")
-            passw = st.text_input("🔒 Password (min 6 chars)", type="password")
-            goal  = st.selectbox("🎯 Goal", ["Score above 75%","Score above 85%",
-                                              "Just pass","Top of class"])
+            st.markdown(
+                "<h3 style='color:white;text-align:center;font-size:1.4rem'>"
+                "Create Account ✨</h3>",
+                unsafe_allow_html=True)
+            name  = st.text_input("👤 Full Name",  key="su_name")
+            email = st.text_input("📧 Email",      key="su_email")
+            passw = st.text_input("🔒 Password",   type="password", key="su_pass")
+            st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Create Account →", use_container_width=True):
                 if name and email and passw and len(passw) >= 6:
                     st.session_state.logged_in = True
@@ -197,939 +296,670 @@ if not st.session_state.logged_in:
     st.stop()
 
 
-# ── Models ────────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="🧠 Training AI models...")
-def get_models():
-    pipe  = run_pipeline()
-    df_fe = engineer_features(pipe["clean_df"])
-    reg   = train_regression(df_fe,    save_dir="models")
-    clf   = train_classification(df_fe, save_dir="models")
-    return {
-        "reg_rf":  reg["random_forest"]["model"],
-        "clf_rf":  clf["random_forest"]["model"],
-        "reg_imp": reg["random_forest"]["feature_importances"],
-        "df_fe":   df_fe,
-    }
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-
-# ── Quiz bank ─────────────────────────────────────────────────────────────────
-QUIZ_BANK = {
-    "Mathematics": [
-        {"q": "What is the derivative of x²?",
-         "options": ["2x", "x²", "2", "x"], "answer": "2x"},
-        {"q": "What is ∫2x dx?",
-         "options": ["x²+C", "2x²+C", "x+C", "2+C"], "answer": "x²+C"},
-        {"q": "If a² + b² = c², this is called?",
-         "options": ["Pythagorean theorem","Euler's formula","Binomial theorem","Fermat's theorem"],
-         "answer": "Pythagorean theorem"},
-        {"q": "What is log(1)?",
-         "options": ["0","1","-1","undefined"], "answer": "0"},
-    ],
-    "Physics": [
-        {"q": "What is Newton's second law?",
-         "options": ["F=ma","E=mc²","F=mv","P=mv"], "answer": "F=ma"},
-        {"q": "Unit of electric current?",
-         "options": ["Ampere","Volt","Ohm","Watt"], "answer": "Ampere"},
-        {"q": "Speed of light in vacuum?",
-         "options": ["3×10⁸ m/s","3×10⁶ m/s","3×10¹⁰ m/s","3×10⁴ m/s"],
-         "answer": "3×10⁸ m/s"},
-        {"q": "Which law states energy cannot be created or destroyed?",
-         "options": ["1st law of thermodynamics","Newton's 1st law",
-                     "Ohm's law","Faraday's law"],
-         "answer": "1st law of thermodynamics"},
-    ],
-    "Computer Science": [
-        {"q": "What does CPU stand for?",
-         "options": ["Central Processing Unit","Computer Personal Unit",
-                     "Core Processing Utility","Central Program Unit"],
-         "answer": "Central Processing Unit"},
-        {"q": "Which data structure uses LIFO?",
-         "options": ["Stack","Queue","Array","Tree"], "answer": "Stack"},
-        {"q": "What is the time complexity of binary search?",
-         "options": ["O(log n)","O(n)","O(n²)","O(1)"], "answer": "O(log n)"},
-        {"q": "HTML stands for?",
-         "options": ["HyperText Markup Language","High Tech Modern Language",
-                     "HyperText Modern Links","High Text Markup Language"],
-         "answer": "HyperText Markup Language"},
-    ],
-    "Chemistry": [
-        {"q": "What is the atomic number of Carbon?",
-         "options": ["6","12","8","14"], "answer": "6"},
-        {"q": "What is the chemical formula of water?",
-         "options": ["H₂O","HO₂","H₂O₂","H₃O"], "answer": "H₂O"},
-        {"q": "Which gas is most abundant in Earth's atmosphere?",
-         "options": ["Nitrogen","Oxygen","Carbon dioxide","Argon"],
-         "answer": "Nitrogen"},
-        {"q": "pH of pure water?",
-         "options": ["7","0","14","5"], "answer": "7"},
-    ],
-    "Biology": [
-        {"q": "What is the powerhouse of the cell?",
-         "options": ["Mitochondria","Nucleus","Ribosome","Golgi body"],
-         "answer": "Mitochondria"},
-        {"q": "DNA stands for?",
-         "options": ["Deoxyribonucleic Acid","Diribonucleic Acid",
-                     "Deoxyribose Nucleic Acid","Dynamic Nucleic Acid"],
-         "answer": "Deoxyribonucleic Acid"},
-        {"q": "How many chromosomes do humans have?",
-         "options": ["46","23","48","44"], "answer": "46"},
-        {"q": "Which organ produces insulin?",
-         "options": ["Pancreas","Liver","Kidney","Heart"], "answer": "Pancreas"},
-    ],
-    "English": [
-        {"q": "What is a synonym for 'happy'?",
-         "options": ["Joyful","Sad","Angry","Tired"], "answer": "Joyful"},
-        {"q": "Identify the noun: 'The cat sat on the mat'",
-         "options": ["cat","sat","on","the"], "answer": "cat"},
-        {"q": "What is an antonym of 'ancient'?",
-         "options": ["Modern","Old","Historic","Classic"], "answer": "Modern"},
-        {"q": "Which is a conjunction?",
-         "options": ["and","run","happy","quickly"], "answer": "and"},
-    ],
-    "History": [
-        {"q": "In which year did World War 2 end?",
-         "options": ["1945","1939","1942","1950"], "answer": "1945"},
-        {"q": "Who was the first President of the United States?",
-         "options": ["George Washington","Abraham Lincoln",
-                     "Thomas Jefferson","John Adams"],
-         "answer": "George Washington"},
-        {"q": "The French Revolution began in which year?",
-         "options": ["1789","1776","1804","1815"], "answer": "1789"},
-        {"q": "Mahatma Gandhi led independence movement of which country?",
-         "options": ["India","Pakistan","Bangladesh","Sri Lanka"],
-         "answer": "India"},
-    ],
-}
-
-
-# ── Email reminder ────────────────────────────────────────────────────────────
-def send_reminder_email(to_email, student_name, subjects_info):
-    """
-    Sends a study reminder email using Gmail SMTP.
-    Requires SMTP credentials in Streamlit secrets.
-    """
+def extract_pdf_text(uploaded_file) -> tuple[str, str | None]:
     try:
-        sender   = st.secrets["email"]["sender"]
-        password = st.secrets["email"]["password"]
-    except Exception:
-        return False, "Email credentials not configured in Streamlit secrets."
-
-    subject_lines = "\n".join([
-        f"  • {s['name']} — {s['days_left']} days left (Past score: {s['past_score']}%)"
-        for s in subjects_info
-    ])
-
-    body = f"""
-Hi {student_name}! 👋
-
-This is your StudyAI reminder to keep up your study momentum!
-
-📚 YOUR SUBJECTS:
-{subject_lines}
-
-💡 TIPS:
-- Study consistently every day — even 1 hour helps
-- Focus on weak subjects first
-- Complete pending topics before your exam
-- Take practice quizzes on StudyAI to test yourself
-
-Keep going — you've got this! 💪
-
-Best,
-StudyAI Team
-    """
-
-    msg = MIMEMultipart()
-    msg["From"]    = sender
-    msg["To"]      = to_email
-    msg["Subject"] = f"📚 StudyAI Reminder — {student_name}, your exams are coming up!"
-    msg.attach(MIMEText(body, "plain"))
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender, password)
-            server.send_message(msg)
-        return True, "Email sent successfully!"
+        reader = PyPDF2.PdfReader(uploaded_file)
+        text   = "\n".join(
+            p.extract_text() or "" for p in reader.pages
+        ).strip()
+        if len(text) < 30:
+            return "", "PDF seems empty or image-only. Please use a text-based PDF."
+        return text, None
     except Exception as e:
-        return False, str(e)
+        return "", str(e)
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+def call_gemini(prompt: str) -> tuple[str, str | None]:
+    if not GEMINI_OK:
+        return "", "Gemini API key not set. Add it to Streamlit secrets."
+    try:
+        model    = genai.GenerativeModel("gemini-1.5-flash")
+        response = model.generate_content(prompt)
+        return response.text.strip(), None
+    except Exception as e:
+        return "", str(e)
+
+
+def generate_study_plan(subject: str, exam_date: date,
+                         hours_per_day: float,
+                         syllabus_text: str) -> tuple[str, str | None]:
+    today     = date.today()
+    days_left = (exam_date - today).days
+
+    if days_left <= 0:
+        return "", "Exam date must be in the future."
+
+    prompt = f"""
+You are an expert study coach. Create a detailed day-by-day study plan.
+
+Student details:
+- Subject: {subject}
+- Exam Date: {exam_date.strftime('%d %B %Y')}
+- Days remaining: {days_left} days
+- Study hours per day: {hours_per_day} hours
+- Syllabus / Topics:
+{syllabus_text[:2000]}
+
+Create a complete day-by-day study plan from today until the exam.
+Format each day exactly like this:
+
+**Day 1 — [Date] — [Topic Name]**
+- What to study: [specific topics]
+- Focus: [key concepts]
+- Time allocation: [X hours]
+- Tips: [1 specific tip]
+
+After all days, add:
+
+**REVISION STRATEGY**
+[2-3 bullet points on how to revise]
+
+**EXAM DAY TIPS**
+[3 bullet points for exam day]
+
+Be specific, practical and motivating. Total plan must cover all days until exam.
+"""
+    return call_gemini(prompt)
+
+
+def summarize_pdf(pdf_text: str, subject: str) -> tuple[str, str | None]:
+    prompt = f"""
+You are an expert teacher. Summarize the following study material for {subject}.
+
+STUDY MATERIAL:
+{pdf_text[:4000]}
+
+Create a clear, structured summary with:
+
+## 📌 Key Topics Covered
+[List main topics]
+
+## 🧠 Important Concepts
+[Explain key concepts in simple language, 3-5 sentences each]
+
+## ⚡ Quick Revision Points
+[10-15 bullet points of most important facts]
+
+## 🔑 Key Formulas / Definitions
+[Any important formulas, definitions or dates]
+
+## ❓ Likely Exam Areas
+[3-5 topics most likely to appear in exam based on this content]
+
+Make it student-friendly, clear and easy to revise from.
+"""
+    return call_gemini(prompt)
+
+
+def generate_mcq_paper(pdf_text: str, subject: str,
+                        n_questions: int) -> tuple[list, str | None]:
+    prompt = f"""
+You are an expert examiner. Create a proper MCQ question paper for {subject}.
+
+STUDY MATERIAL:
+{pdf_text[:4000]}
+
+Generate exactly {n_questions} multiple choice questions based on this material.
+
+Return ONLY a valid JSON array. No explanation. No markdown. No code blocks.
+Exactly this format:
+[
+  {{
+    "q": "Full question text?",
+    "options": ["A. option one", "B. option two", "C. option three", "D. option four"],
+    "answer": "A. option one",
+    "explanation": "Brief explanation of why this is correct",
+    "topic": "topic this question is from",
+    "difficulty": "Easy/Medium/Hard"
+  }}
+]
+
+Rules:
+- Base ALL questions on the provided material
+- Mix Easy, Medium and Hard questions
+- Options must start with A. B. C. D.
+- answer must exactly match one of the options
+- Return ONLY the JSON array
+"""
+    text, err = call_gemini(prompt)
+    if err:
+        return [], err
+    try:
+        text = re.sub(r"```json\s*", "", text)
+        text = re.sub(r"```\s*",     "", text)
+        return json.loads(text.strip()), None
+    except Exception as e:
+        return [], f"Could not parse AI response. Try again. ({e})"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown(f"""
-    <div style='padding:1rem 0; border-bottom:1px solid rgba(79,110,245,0.2); margin-bottom:1rem'>
-        <div style='font-size:1.5rem'>🎓</div>
-        <div style='color:white;font-weight:700;font-size:1.1rem'>{st.session_state.username}</div>
-        <div style='color:rgba(255,255,255,0.4);font-size:0.8rem'>{st.session_state.email}</div>
+    <div style='padding:1.25rem 0;
+         border-bottom:1px solid rgba(79,110,245,0.2);
+         margin-bottom:1.25rem'>
+        <div style='font-size:2rem'>🎓</div>
+        <div style='color:white;font-weight:700;font-size:1.1rem;margin-top:4px'>
+            {st.session_state.username}
+        </div>
+        <div style='color:rgba(255,255,255,0.35);font-size:0.8rem'>
+            {st.session_state.email}
+        </div>
     </div>""", unsafe_allow_html=True)
 
-    hours_per_day = st.slider("⏰ Study Hours / Day", 1.0, 12.0, 5.0, 0.5)
-    target_score  = st.slider("🎯 Target Score (%)",  50, 100, 75)
+    st.markdown("""
+    <div style='color:rgba(255,255,255,0.5);font-size:0.8rem;
+         text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.75rem'>
+        How to use
+    </div>""", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown("### ➕ Add Subject")
-
-    PRESETS = {
-        "Mathematics": 0.85, "Physics": 0.80, "Chemistry": 0.75,
-        "Computer Science": 0.70, "Biology": 0.60,
-        "English": 0.45, "History": 0.50,
-    }
-
-    with st.form("add_subject", clear_on_submit=True):
-        s_name  = st.selectbox("Subject", list(PRESETS.keys()))
-        s_days  = st.number_input("Days to Exam", 1, 180, 21)
-        s_score = st.slider("Past Score (%)", 0, 100, 60)
-        s_comp  = st.slider("Topics Done (%)", 0, 100, 40)
-        if st.form_submit_button("➕ Add", use_container_width=True):
-            # avoid duplicates
-            existing = [s["name"] for s in st.session_state.subjects]
-            if s_name in existing:
-                st.warning(f"{s_name} already added!")
-            else:
-                st.session_state.subjects.append({
-                    "name": s_name, "difficulty": PRESETS[s_name],
-                    "days_left": int(s_days), "past_score": float(s_score),
-                    "completion_pct": float(s_comp),
-                    "target_score": float(target_score),
-                })
-                st.success(f"Added {s_name}!")
-
-    if st.session_state.subjects:
-        st.markdown(f"**{len(st.session_state.subjects)} subject(s) added**")
-        if st.button("🗑 Clear All", use_container_width=True):
-            st.session_state.subjects = []
-            st.rerun()
+    for step, desc in [
+        ("1️⃣ Study Plan",  "Enter subject + exam date → get AI plan"),
+        ("2️⃣ PDF Summary", "Upload PDF → get smart summary"),
+        ("3️⃣ MCQ Quiz",    "Upload PDF → get question paper"),
+    ]:
+        st.markdown(f"""
+        <div style='background:rgba(255,255,255,0.03);
+             border:1px solid rgba(255,255,255,0.07);
+             border-radius:10px;padding:0.6rem 0.75rem;
+             margin-bottom:0.5rem'>
+            <div style='color:white;font-size:0.85rem;font-weight:500'>
+                {step}
+            </div>
+            <div style='color:rgba(255,255,255,0.4);font-size:0.75rem'>
+                {desc}
+            </div>
+        </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
     if st.button("🚪 Logout", use_container_width=True):
-        for k in ["logged_in","subjects","syllabus","quiz_score","quiz_total"]:
-            st.session_state[k] = False if k == "logged_in" else [] if k == "subjects" else {} if k == "syllabus" else 0
+        for k in defaults:
+            st.session_state[k] = defaults[k]
         st.rerun()
 
-    # Demo subjects fallback
-    if not st.session_state.subjects:
-        st.session_state.subjects = [
-            {"name":"Mathematics",     "difficulty":0.85,"days_left":14,
-             "past_score":55,"completion_pct":40,"target_score":float(target_score)},
-            {"name":"Physics",         "difficulty":0.80,"days_left":21,
-             "past_score":62,"completion_pct":55,"target_score":float(target_score)},
-            {"name":"Computer Science","difficulty":0.70,"days_left":10,
-             "past_score":70,"completion_pct":60,"target_score":float(target_score)},
-            {"name":"English",         "difficulty":0.45,"days_left":30,
-             "past_score":78,"completion_pct":80,"target_score":float(target_score)},
-        ]
 
-
-# ── Hero ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
 st.markdown(f"""
-<div class='hero-section'>
-    <div class='hero-title'>Welcome back, {st.session_state.username}! 👋</div>
-    <div class='hero-sub'>AI-powered study planning · ML predictions · Smart scheduling</div>
+<div class='hero'>
+    <div class='hero-title'>StudyAI 🎓</div>
+    <div class='hero-sub'>
+        AI-powered study plans · PDF summaries · Smart MCQ papers
+    </div>
 </div>""", unsafe_allow_html=True)
 
-# ── Load models & build planner ───────────────────────────────────────────────
-models    = get_models()
-reg_model = models["reg_rf"]
-clf_model = models["clf_rf"]
-subj_objs = [Subject(**s) for s in st.session_state.subjects]
-planner   = StudyPlanner(subj_objs, hours_per_day=hours_per_day)
-schedule  = planner.generate_schedule()
-summary_df= planner.summary()
-
-# Compute predictions for all subjects
-predictions = []
-for s in subj_objs:
-    feat = {
-        "study_hrs_day":          hours_per_day,
-        "consistency":            0.75,
-        "difficulty":             s.difficulty,
-        "days_left":              s.days_left,
-        "past_score":             s.past_score,
-        "completion_pct":         s.completion_pct,
-        "urgency_score":          s.urgency,
-        "performance_gap":        s.performance_gap,
-        "study_efficiency":       s.past_score * 0.75 / (s.difficulty * hours_per_day + 1),
-        "completion_rate":        s.completion_pct / 100,
-        "remaining_topics_ratio": 1 - s.completion_pct / 100,
-        "productive_hours":       0.75 * hours_per_day,
-        "hard_work_remaining":    s.difficulty * (1 - s.completion_pct / 100),
-    }
-    avail = [c for c in FEATURE_COLS if c in feat]
-    X     = np.array([[feat[c] for c in avail]])
-    pred  = float(np.clip(reg_model.predict(X)[0], 0, 100))
-    risk  = int(clf_model.predict(X)[0])
-    conf  = float(clf_model.predict_proba(X)[0][0] * 100)
-    predictions.append({
-        "Subject": s.name, "Past Score": s.past_score,
-        "Predicted": round(pred, 1), "At Risk": risk,
-        "Confidence": round(conf, 1), "Days Left": s.days_left,
-        "Priority": round(s.priority_score, 3),
-    })
-
-pred_df  = pd.DataFrame(predictions)
-n_risk   = int(pred_df["At Risk"].sum())
-avg_pred = float(pred_df["Predicted"].mean())
-
-# ── KPI row ───────────────────────────────────────────────────────────────────
-k1, k2, k3, k4 = st.columns(4)
-for col, num, label, color in [
-    (k1, len(pred_df),                    "📚 Subjects",       "#4F6EF5"),
-    (k2, f"{avg_pred:.1f}%",              "🎯 Avg Predicted",  "#6EE7B7"),
-    (k3, n_risk,                          "⚠️ At Risk",        "#f87171" if n_risk else "#6EE7B7"),
-    (k4, f"{pred_df['Days Left'].mean():.0f}d", "📅 Avg Days", "#a78bfa"),
-]:
-    with col:
-        st.markdown(f"""
-        <div class='kpi-card'>
-            <div class='kpi-number' style='color:{color}'>{num}</div>
-            <div class='kpi-label'>{label}</div>
-        </div>""", unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# ── TABS ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📊 Dashboard", "📅 Schedule", "🤖 ML Predictions",
-    "📈 Analytics", "📝 Syllabus", "🧠 Quiz"
+tab1, tab2, tab3 = st.tabs([
+    "📅  Study Plan",
+    "📄  PDF Summary",
+    "🧠  MCQ Quiz Paper",
 ])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — DASHBOARD
+# TAB 1 — STUDY PLAN
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.markdown("<div class='section-title'>Subject Overview</div>",
+    st.markdown("<div class='section-title'>📅 AI Study Plan Generator</div>",
                 unsafe_allow_html=True)
-    for p in predictions:
-        badge     = "<span class='badge-risk'>⚠ At Risk</span>" if p["At Risk"] \
-                    else "<span class='badge-safe'>✅ Safe</span>"
-        bar_color = "#6EE7B7" if p["Predicted"] >= target_score else "#f87171"
+    st.markdown("""
+    <div class='info-box'>
+        💡 Tell the AI your subject, exam date and syllabus —
+        it will create a complete day-by-day study plan just for you.
+    </div>""", unsafe_allow_html=True)
+
+    with st.container():
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            subject = st.text_input("📚 Subject Name",
+                                     placeholder="e.g. Physics, History...")
+        with c2:
+            exam_date = st.date_input("📅 Exam Date",
+                                       min_value=date.today(),
+                                       value=date.today())
+        with c3:
+            hours_day = st.slider("⏰ Study Hours/Day", 1.0, 12.0, 4.0, 0.5)
+
+        days_left = (exam_date - date.today()).days
+        if days_left > 0:
+            st.markdown(f"""
+            <div class='tip'>
+                ✅ You have <strong>{days_left} days</strong> until your exam ·
+                Total study time: <strong>{days_left * hours_day:.0f} hours</strong>
+            </div>""", unsafe_allow_html=True)
+        elif days_left == 0:
+            st.markdown("""
+            <div class='warn'>⚠️ Exam is today! Good luck! 🍀</div>""",
+            unsafe_allow_html=True)
+
+        st.markdown("**📝 Your Syllabus / Topics**")
+        st.caption("Paste your syllabus, topics list, or anything you need to study")
+        syllabus_input = st.text_area(
+            "Syllabus",
+            placeholder="""Example:
+Chapter 1: Laws of Motion - Newton's laws, friction, circular motion
+Chapter 2: Work, Energy & Power - kinetic energy, potential energy, conservation
+Chapter 3: Gravitation - universal law, escape velocity, satellites
+Chapter 4: Thermodynamics - laws, heat engines, entropy""",
+            height=200,
+            label_visibility="collapsed"
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        if st.button("🤖 Generate My Study Plan", use_container_width=True):
+            if not subject.strip():
+                st.error("Please enter a subject name.")
+            elif days_left <= 0:
+                st.error("Please select a future exam date.")
+            elif not syllabus_input.strip():
+                st.error("Please enter your syllabus or topics.")
+            elif not GEMINI_OK:
+                st.error("Gemini API key not configured. Add it to Streamlit secrets.")
+            else:
+                with st.spinner(f"🧠 AI is creating your {days_left}-day study plan..."):
+                    plan, err = generate_study_plan(
+                        subject, exam_date, hours_day, syllabus_input
+                    )
+                if err:
+                    st.error(f"Error: {err}")
+                else:
+                    st.session_state.study_plans[subject] = plan
+                    st.success("✅ Study plan generated!")
+
+    # Show plan
+    if st.session_state.study_plans:
+        latest_subj = list(st.session_state.study_plans.keys())[-1]
+        latest_plan = st.session_state.study_plans[latest_subj]
+
+        st.markdown(
+            f"<div class='section-title'>📋 Your Study Plan — {latest_subj}</div>",
+            unsafe_allow_html=True)
+
+        st.markdown(latest_plan)
+
+        # Download button
+        st.download_button(
+            label="⬇️ Download Study Plan",
+            data=latest_plan,
+            file_name=f"study_plan_{latest_subj.replace(' ','_')}.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — PDF SUMMARY
+# ══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    st.markdown("<div class='section-title'>📄 PDF Summarizer</div>",
+                unsafe_allow_html=True)
+    st.markdown("""
+    <div class='info-box'>
+        💡 Upload any PDF — notes, textbook chapter, syllabus —
+        and AI will create a smart summary with key points and likely exam areas.
+    </div>""", unsafe_allow_html=True)
+
+    s_subject = st.text_input("📚 Subject",
+                               placeholder="e.g. Organic Chemistry",
+                               key="sum_subj")
+
+    uploaded = st.file_uploader("📄 Upload PDF",
+                                 type=["pdf"],
+                                 key="sum_pdf")
+
+    if uploaded:
+        fsize = len(uploaded.getvalue()) / 1024
         st.markdown(f"""
-        <div class='subject-card'>
-            <div style='display:flex;justify-content:space-between;align-items:center'>
-                <div>
-                    <div style='font-size:1.1rem;font-weight:600;color:white'>{p['Subject']}</div>
-                    <div style='color:rgba(255,255,255,0.4);font-size:0.8rem;margin-top:2px'>
-                        {p['Days Left']} days left &nbsp;·&nbsp; Past: {p['Past Score']}%
-                        &nbsp;·&nbsp; Priority: {p['Priority']}
-                    </div>
-                </div>
-                <div style='text-align:right'>
-                    <div style='font-size:1.8rem;font-weight:800;color:{bar_color}'>
-                        {p['Predicted']}%
-                    </div>
-                    {badge}
-                </div>
+        <div class='tip'>
+            📄 <strong>{uploaded.name}</strong> · {fsize:.1f} KB uploaded
+        </div>""", unsafe_allow_html=True)
+
+        if st.button("🤖 Summarize This PDF", use_container_width=True):
+            if not s_subject.strip():
+                st.error("Please enter the subject name.")
+            else:
+                with st.spinner("📖 Reading PDF..."):
+                    pdf_text, pdf_err = extract_pdf_text(uploaded)
+
+                if pdf_err:
+                    st.error(pdf_err)
+                elif not pdf_text:
+                    st.error("Could not extract text. Use a text-based PDF.")
+                else:
+                    with st.spinner("🧠 AI is summarizing your notes..."):
+                        summary, err = summarize_pdf(pdf_text, s_subject)
+
+                    if err:
+                        st.error(f"Error: {err}")
+                    else:
+                        st.session_state.summary = summary
+                        st.success("✅ Summary ready!")
+
+    else:
+        st.markdown("""
+        <div class='upload-box'>
+            <div style='font-size:2.5rem;margin-bottom:0.75rem'>📄</div>
+            <div style='color:white;font-weight:600;margin-bottom:0.4rem'>
+                Drop your PDF here
             </div>
-            <div style='background:rgba(255,255,255,0.08);border-radius:99px;
-                        height:8px;margin-top:10px'>
-                <div style='width:{int(p["Predicted"])}%;height:8px;border-radius:99px;
-                     background:linear-gradient(90deg,{bar_color},{bar_color}88)'></div>
+            <div style='color:rgba(255,255,255,0.35);font-size:0.85rem'>
+                Notes · Textbook chapters · Syllabus documents
             </div>
         </div>""", unsafe_allow_html=True)
 
-    if n_risk > 0:
-        names = [p["Subject"] for p in predictions if p["At Risk"]]
-        st.markdown(f"""
-        <div class='warning-box'>⚠️ <strong>{n_risk} subject(s) at risk:</strong>
-        {', '.join(names)}. Increase study hours or topic completion.</div>""",
-        unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <div class='tip-box'>✅ All subjects on track! Keep up the momentum.</div>""",
-        unsafe_allow_html=True)
-
-    # Email reminder section
-    st.markdown("<div class='section-title'>📧 Email Reminder</div>",
-                unsafe_allow_html=True)
-    reminder_email = st.text_input("Send reminder to email",
-                                    value=st.session_state.email,
-                                    placeholder="student@example.com")
-    if st.button("📨 Send Study Reminder Email"):
-        ok, msg = send_reminder_email(
-            reminder_email,
-            st.session_state.username,
-            st.session_state.subjects
-        )
-        if ok:
-            st.success(f"✅ Reminder sent to {reminder_email}!")
-        else:
-            st.info(f"ℹ️ Email not configured yet. To enable: add Gmail credentials "
-                    f"to Streamlit secrets. Error: {msg}")
-            st.markdown("""
-            <div class='tip-box'>
-            📌 <strong>To enable real emails:</strong><br>
-            1. Go to your Streamlit Cloud app → Settings → Secrets<br>
-            2. Add this:<br><br>
-            <code>[email]<br>
-            sender = "yourgmail@gmail.com"<br>
-            password = "your_app_password"</code><br><br>
-            3. Enable 2FA on Gmail → Generate App Password → paste above
-            </div>""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — SCHEDULE
-# ══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.markdown("<div class='section-title'>Your Personalized Study Schedule</div>",
-                unsafe_allow_html=True)
-
-    if not schedule:
-        st.warning("No schedule yet. Add subjects in the sidebar.")
-    else:
-        show_days = st.slider("Days to preview", 3, min(30, len(schedule)), 7)
-        COLORS_LIST = ["#4F6EF5","#6EE7B7","#f59e0b","#a78bfa","#f87171","#34d399"]
-        all_subjs   = list({s for d in schedule[:show_days] for s in d.sessions})
-        color_map   = {s: COLORS_LIST[i % len(COLORS_LIST)]
-                       for i, s in enumerate(all_subjs)}
-
-        for day in schedule[:show_days]:
-            blocks = "".join([
-                f"""<span style='background:{color_map.get(s,"#4F6EF5")}22;
-                    color:{color_map.get(s,"#4F6EF5")};
-                    border:1px solid {color_map.get(s,"#4F6EF5")}44;
-                    border-radius:8px;padding:4px 12px;
-                    font-size:0.8rem;font-weight:600;margin-right:6px'>
-                    {s.split()[0]} {h:.1f}h</span>"""
-                for s, h in day.sessions.items()
-            ])
-            st.markdown(f"""
-            <div class='schedule-day'>
-                <div style='font-size:0.8rem;color:rgba(255,255,255,0.4);
-                            font-weight:500;margin-bottom:6px'>
-                    {day.date.strftime('%A, %d %B')}
-                </div>
-                <div>{blocks}</div>
-            </div>""", unsafe_allow_html=True)
-
-        # Stacked bar chart
-        st.markdown("<div class='section-title'>Hours Distribution Chart</div>",
+    # Show summary
+    if st.session_state.summary:
+        st.markdown("<div class='section-title'>📋 AI Summary</div>",
                     unsafe_allow_html=True)
-        plot_days = schedule[:min(14, len(schedule))]
-        dates     = [d.date.strftime("%d/%m") for d in plot_days]
-        data_mat  = np.array([[d.sessions.get(s, 0) for s in all_subjs]
-                               for d in plot_days])
-        fig, ax   = plt.subplots(figsize=(12, 4))
-        fig.patch.set_facecolor("#1a1a2e")
-        ax.set_facecolor("#1a1a2e")
-        bottom = np.zeros(len(plot_days))
-        for i, subj in enumerate(all_subjs):
-            c = color_map.get(subj, "#4F6EF5")
-            ax.bar(dates, data_mat[:, i], bottom=bottom,
-                   label=subj, color=c, alpha=0.85)
-            bottom += data_mat[:, i]
-        ax.set_ylabel("Hours", color="white")
-        ax.tick_params(colors="white")
-        ax.spines[:].set_color("#2a2a3e")
-        plt.xticks(rotation=45, ha="right", color="white", fontsize=8)
-        ax.legend(fontsize=8, labelcolor="white", facecolor="#16213e",
-                  edgecolor="#2a2a3e")
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
+        st.markdown(st.session_state.summary)
 
-        # Priority table
-        st.markdown("<div class='section-title'>Priority Summary</div>",
-                    unsafe_allow_html=True)
-        st.dataframe(
-            summary_df[["Subject","Daily Hours","Priority Score","Days Left"]].style
-            .background_gradient(cmap="Blues", subset=["Priority Score"]),
-            use_container_width=True
+        st.download_button(
+            label="⬇️ Download Summary",
+            data=st.session_state.summary,
+            file_name="pdf_summary.txt",
+            mime="text/plain",
+            use_container_width=True,
         )
 
-    # Adaptive re-planning
-    st.markdown("<div class='section-title'>🔁 Update Progress & Re-Plan</div>",
-                unsafe_allow_html=True)
-    subj_names = [s["name"] for s in st.session_state.subjects]
-    if subj_names:
-        up_subj  = st.selectbox("Subject to update", subj_names)
-        ca, cb   = st.columns(2)
-        with ca:
-            new_comp = st.slider("New Completion %", 0, 100, 60)
-        with cb:
-            new_sc = st.number_input("New Score (0 = skip)", 0, 100, 0)
-        if st.button("🔄 Update & Re-Plan", use_container_width=True):
-            planner.update_progress(up_subj, new_comp,
-                                     float(new_sc) if new_sc > 0 else None)
-            st.success(f"✅ Schedule updated for {up_subj}!")
-            st.rerun()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ML PREDICTIONS
+# TAB 3 — MCQ QUIZ PAPER
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.markdown("<div class='section-title'>Live Performance Predictor</div>",
+    st.markdown("<div class='section-title'>🧠 MCQ Question Paper Generator</div>",
                 unsafe_allow_html=True)
-    st.caption("Adjust sliders — prediction updates instantly")
-
-    cl, cr = st.columns(2)
-    with cl:
-        i_study = st.slider("📖 Study hrs/day",     0.5, 12.0, 4.0, 0.5, key="p_study")
-        i_cons  = st.slider("💪 Consistency",       0.0,  1.0, 0.7, 0.05, key="p_cons")
-        i_diff  = st.slider("🧠 Difficulty",        0.1,  1.0, 0.7, 0.05, key="p_diff")
-    with cr:
-        i_days  = st.number_input("📅 Days to Exam", 1, 180, 20, key="p_days")
-        i_past  = st.slider("📝 Past Score (%)",     0, 100, 60, key="p_past")
-        i_comp  = st.slider("✅ Topics Done (%)",    0, 100, 50, key="p_comp")
-
-    feat_in = {
-        "study_hrs_day":          i_study,
-        "consistency":            i_cons,
-        "difficulty":             i_diff,
-        "days_left":              i_days,
-        "past_score":             i_past,
-        "completion_pct":         i_comp,
-        "urgency_score":          i_diff / (i_days + 1),
-        "performance_gap":        max(0, target_score - i_past),
-        "study_efficiency":       i_past * i_cons / (i_diff * i_study + 1),
-        "completion_rate":        i_comp / 100,
-        "remaining_topics_ratio": 1 - i_comp / 100,
-        "productive_hours":       i_cons * i_study,
-        "hard_work_remaining":    i_diff * (1 - i_comp / 100),
-    }
-    avail = [c for c in FEATURE_COLS if c in feat_in]
-    X_in  = np.array([[feat_in[c] for c in avail]])
-    pred  = float(np.clip(reg_model.predict(X_in)[0], 0, 100))
-    risk  = int(clf_model.predict(X_in)[0])
-    conf  = float(clf_model.predict_proba(X_in)[0][0] * 100)
-    rc    = "#f87171" if risk else "#6EE7B7"
-
-    st.markdown(f"""
-    <div class='pred-result'>
-        <div style='color:rgba(255,255,255,0.5);font-size:0.9rem;margin-bottom:0.5rem'>
-            Predicted Score
-        </div>
-        <div class='pred-score-big'>{pred:.1f}%</div>
-        <div style='margin-top:1rem;display:flex;justify-content:center;gap:3rem'>
-            <div style='text-align:center'>
-                <div style='color:{rc};font-weight:700;font-size:1.1rem'>
-                    {"⚠ At Risk" if risk else "✅ Safe"}
-                </div>
-                <div style='color:rgba(255,255,255,0.4);font-size:0.8rem'>Risk Level</div>
-            </div>
-            <div style='text-align:center'>
-                <div style='color:#a78bfa;font-weight:700;font-size:1.1rem'>{conf:.1f}%</div>
-                <div style='color:rgba(255,255,255,0.4);font-size:0.8rem'>Confidence</div>
-            </div>
-        </div>
+    st.markdown("""
+    <div class='info-box'>
+        💡 Upload your notes or textbook PDF — AI will generate a proper
+        MCQ question paper with answer key and explanations.
     </div>""", unsafe_allow_html=True)
 
-    msg_html = f"""<div class='{"warning-box" if risk else "tip-box"}'>
-        {"⚠️ At risk — increase study hours and topic completion." if risk
-         else "✅ On track! Maintain your current study habits."}
-    </div>"""
-    st.markdown(msg_html, unsafe_allow_html=True)
+    # init quiz state
+    if "questions"  not in st.session_state.quiz_state:
+        st.session_state.quiz_state = {
+            "questions": [], "answers": {},
+            "submitted": False, "score": 0, "source": ""
+        }
 
-    # Feature importance chart
-    st.markdown("<div class='section-title'>Feature Importance</div>",
-                unsafe_allow_html=True)
-    avail_feats = [c for c in FEATURE_COLS if c in models["df_fe"].columns]
-    imp = models["reg_imp"]
-    idx = np.argsort(imp)
-    fig2, ax2 = plt.subplots(figsize=(8, 5))
-    fig2.patch.set_facecolor("#1a1a2e")
-    ax2.set_facecolor("#1a1a2e")
-    ax2.barh(np.array(avail_feats)[idx], imp[idx],
-             color=["#4F6EF5" if v > 0.1 else "#6C3EE8" for v in imp[idx]])
-    ax2.set_xlabel("Importance", color="white")
-    ax2.tick_params(colors="white")
-    ax2.spines[:].set_color("#2a2a3e")
-    ax2.set_title("What drives predicted score?", color="white", fontweight="bold")
-    plt.tight_layout()
-    st.pyplot(fig2)
-    plt.close()
+    qs = st.session_state.quiz_state
 
+    q_subject = st.text_input("📚 Subject",
+                               placeholder="e.g. Biology",
+                               key="quiz_subj_inp")
+    n_qs      = st.slider("Number of Questions", 3, 15, 8)
+    mode      = st.radio("Mode",
+                          ["Practice (see answers after submit)",
+                           "Exam (no answers until end)"],
+                          horizontal=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — ANALYTICS
-# ══════════════════════════════════════════════════════════════════════════════
-with tab4:
-    if len(subj_objs) < 2:
-        st.info("Add at least 2 subjects to see analytics.")
-    else:
-        names   = [s.name for s in subj_objs]
-        past    = [s.past_score for s in subj_objs]
-        pred_sc = [p["Predicted"] for p in predictions]
-        x, w    = np.arange(len(names)), 0.35
+    quiz_pdf = st.file_uploader("📄 Upload PDF to generate questions from",
+                                 type=["pdf"],
+                                 key="quiz_pdf")
 
-        # Chart 1: Past vs Predicted
-        st.markdown("<div class='section-title'>Past vs Predicted Scores</div>",
-                    unsafe_allow_html=True)
-        fig3, ax3 = plt.subplots(figsize=(10, 4))
-        fig3.patch.set_facecolor("#1a1a2e")
-        ax3.set_facecolor("#1a1a2e")
-        ax3.bar(x-w/2, past,    w, label="Past Score", color="#4F6EF5", alpha=0.85)
-        ax3.bar(x+w/2, pred_sc, w, label="Predicted",  color="#6EE7B7", alpha=0.85)
-        ax3.axhline(target_score, color="#f87171", linestyle="--",
-                    label=f"Target {target_score}%", linewidth=1.5)
-        ax3.set_xticks(x)
-        ax3.set_xticklabels(names, rotation=20, ha="right",
-                             fontsize=9, color="white")
-        ax3.set_ylim(0, 110)
-        ax3.tick_params(colors="white")
-        ax3.spines[:].set_color("#2a2a3e")
-        ax3.legend(labelcolor="white", facecolor="#16213e",
-                   edgecolor="#2a2a3e", fontsize=9)
-        plt.tight_layout()
-        st.pyplot(fig3)
-        plt.close()
+    if quiz_pdf:
+        fsize = len(quiz_pdf.getvalue()) / 1024
+        st.markdown(f"""
+        <div class='tip'>
+            📄 <strong>{quiz_pdf.name}</strong> · {fsize:.1f} KB
+        </div>""", unsafe_allow_html=True)
 
-        # Chart 2: Topic completion
-        st.markdown("<div class='section-title'>Topic Completion</div>",
-                    unsafe_allow_html=True)
-        fig4, axes4 = plt.subplots(1, 2, figsize=(12, 4))
-        fig4.patch.set_facecolor("#1a1a2e")
-        for ax in axes4:
-            ax.set_facecolor("#1a1a2e")
+        if st.button("🤖 Generate MCQ Paper from PDF",
+                     use_container_width=True):
+            if not q_subject.strip():
+                st.error("Please enter the subject name.")
+            else:
+                with st.spinner("📖 Reading PDF..."):
+                    pdf_text, pdf_err = extract_pdf_text(quiz_pdf)
 
-        comp_vals    = [s.completion_pct for s in subj_objs]
-        wedge_colors = ["#4F6EF5","#6EE7B7","#f59e0b","#a78bfa",
-                        "#f87171","#34d399","#60a5fa"]
-        axes4[0].pie(comp_vals, labels=names, autopct="%1.0f%%",
-                     startangle=90,
-                     colors=wedge_colors[:len(names)],
-                     textprops={"color":"white","fontsize":9})
-        axes4[0].set_title("Completion Distribution", color="white", fontweight="bold")
-
-        # Priority bar
-        priorities = [s.priority_score for s in subj_objs]
-        bars = axes4[1].bar(names, priorities,
-                             color=wedge_colors[:len(names)], alpha=0.85)
-        axes4[1].set_title("Priority Score (higher = needs more focus)",
-                            color="white", fontweight="bold")
-        axes4[1].tick_params(colors="white")
-        axes4[1].spines[:].set_color("#2a2a3e")
-        plt.xticks(rotation=20, ha="right", color="white", fontsize=9)
-        plt.tight_layout()
-        st.pyplot(fig4)
-        plt.close()
-
-        # Hours impact simulator
-        st.markdown("<div class='section-title'>Study Hours Impact Simulator</div>",
-                    unsafe_allow_html=True)
-        sel = st.selectbox("Select subject", names, key="analytics_sel")
-        s_s = next(s for s in subj_objs if s.name == sel)
-        hrs_r     = np.linspace(0.5, 12, 60)
-        sim_preds = []
-        for h in hrs_r:
-            f = {
-                "study_hrs_day":          h,
-                "consistency":            0.75,
-                "difficulty":             s_s.difficulty,
-                "days_left":              s_s.days_left,
-                "past_score":             s_s.past_score,
-                "completion_pct":         s_s.completion_pct,
-                "urgency_score":          s_s.urgency,
-                "performance_gap":        s_s.performance_gap,
-                "study_efficiency":       s_s.past_score*0.75/(s_s.difficulty*h+1),
-                "completion_rate":        s_s.completion_pct/100,
-                "remaining_topics_ratio": 1-s_s.completion_pct/100,
-                "productive_hours":       0.75*h,
-                "hard_work_remaining":    s_s.difficulty*(1-s_s.completion_pct/100),
-            }
-            av = [c for c in FEATURE_COLS if c in f]
-            X_ = np.array([[f[c] for c in av]])
-            sim_preds.append(float(np.clip(reg_model.predict(X_)[0], 0, 100)))
-
-        fig5, ax5 = plt.subplots(figsize=(10, 3.5))
-        fig5.patch.set_facecolor("#1a1a2e")
-        ax5.set_facecolor("#1a1a2e")
-        ax5.plot(hrs_r, sim_preds, color="#4F6EF5", linewidth=2.5)
-        ax5.fill_between(hrs_r, sim_preds, alpha=0.15, color="#4F6EF5")
-        ax5.axhline(target_score,  color="#f87171", linestyle="--",
-                    label=f"Target {target_score}%", linewidth=1.5)
-        ax5.axvline(hours_per_day, color="#f59e0b", linestyle=":",
-                    label=f"Current {hours_per_day}h", linewidth=1.5)
-        ax5.set_xlabel("Study Hours/Day", color="white")
-        ax5.set_ylabel("Predicted Score", color="white")
-        ax5.set_title(f"Score vs Hours — {sel}", color="white", fontweight="bold")
-        ax5.tick_params(colors="white")
-        ax5.spines[:].set_color("#2a2a3e")
-        ax5.legend(labelcolor="white", facecolor="#16213e",
-                   edgecolor="#2a2a3e")
-        plt.tight_layout()
-        st.pyplot(fig5)
-        plt.close()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — SYLLABUS PLANNER
-# ══════════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.markdown("<div class='section-title'>📝 Syllabus & Study Plan Generator</div>",
-                unsafe_allow_html=True)
-    st.caption("Add your syllabus topics — AI generates a focused study plan")
-
-    subj_names = [s["name"] for s in st.session_state.subjects]
-    if not subj_names:
-        st.warning("Add subjects in the sidebar first.")
-    else:
-        sel_subj = st.selectbox("Select Subject", subj_names, key="syl_subj")
-
-        # Add topics
-        with st.form("add_topic", clear_on_submit=True):
-            c1, c2, c3 = st.columns([3, 1, 1])
-            with c1:
-                topic_name = st.text_input("Topic Name",
-                                            placeholder="e.g. Differentiation, Vectors")
-            with c2:
-                topic_hrs  = st.number_input("Est. Hours", 0.5, 20.0, 2.0, 0.5)
-            with c3:
-                topic_done = st.selectbox("Status", ["Not Started","In Progress","Done"])
-            if st.form_submit_button("➕ Add Topic", use_container_width=True):
-                if topic_name:
-                    if sel_subj not in st.session_state.syllabus:
-                        st.session_state.syllabus[sel_subj] = []
-                    st.session_state.syllabus[sel_subj].append({
-                        "topic": topic_name,
-                        "hours": topic_hrs,
-                        "status": topic_done,
-                    })
-                    st.success(f"Added: {topic_name}")
-
-        # Show topics
-        if sel_subj in st.session_state.syllabus and st.session_state.syllabus[sel_subj]:
-            topics = st.session_state.syllabus[sel_subj]
-            st.markdown(f"**{len(topics)} topics for {sel_subj}**")
-
-            total_hrs  = sum(t["hours"] for t in topics)
-            done_hrs   = sum(t["hours"] for t in topics if t["status"] == "Done")
-            progress   = done_hrs / total_hrs if total_hrs > 0 else 0
-
-            p1, p2, p3 = st.columns(3)
-            p1.metric("Total Topics",    len(topics))
-            p2.metric("Total Hours",     f"{total_hrs:.1f}h")
-            p3.metric("Completion",      f"{progress*100:.0f}%")
-
-            st.progress(progress)
-
-            status_colors = {
-                "Done":        ("#6EE7B7", "✅"),
-                "In Progress": ("#f59e0b", "🔄"),
-                "Not Started": ("#f87171", "⭕"),
-            }
-
-            for t in topics:
-                color, icon = status_colors.get(t["status"], ("#fff","•"))
-                st.markdown(f"""
-                <div style='background:rgba(255,255,255,0.03);
-                     border:1px solid rgba(255,255,255,0.08);
-                     border-left:4px solid {color};
-                     border-radius:10px;padding:0.75rem 1rem;
-                     margin-bottom:0.5rem;display:flex;
-                     justify-content:space-between;align-items:center'>
-                    <div>
-                        <span style='color:white;font-weight:500'>{icon} {t['topic']}</span>
-                        <span style='color:rgba(255,255,255,0.4);
-                              font-size:0.8rem;margin-left:1rem'>
-                            {t['hours']}h estimated
-                        </span>
-                    </div>
-                    <span style='color:{color};font-size:0.8rem;font-weight:600'>
-                        {t['status']}
-                    </span>
-                </div>""", unsafe_allow_html=True)
-
-            # Generate AI study plan
-            if st.button("🤖 Generate AI Study Plan", use_container_width=True):
-                pending = [t for t in topics if t["status"] != "Done"]
-                if not pending:
-                    st.balloons()
-                    st.success("🎉 All topics completed! You're ready for the exam!")
+                if pdf_err:
+                    st.error(pdf_err)
+                elif not pdf_text:
+                    st.error("Empty PDF. Use a text-based PDF.")
                 else:
-                    subj_data = next(
-                        (s for s in st.session_state.subjects if s["name"] == sel_subj),
-                        None
-                    )
-                    days_left = subj_data["days_left"] if subj_data else 14
-                    hrs_day   = hours_per_day
-                    total_needed = sum(t["hours"] for t in pending)
-                    days_needed  = total_needed / hrs_day
-
-                    st.markdown("<div class='section-title'>📋 Your AI Study Plan</div>",
-                                unsafe_allow_html=True)
-                    st.markdown(f"""
-                    <div class='tip-box'>
-                        📊 <strong>Plan Summary:</strong> {len(pending)} topics remaining ·
-                        {total_needed:.1f}h total work ·
-                        {hrs_day}h/day ·
-                        Need ~{days_needed:.0f} days ·
-                        You have {days_left} days
-                        {'✅ Enough time!' if days_left >= days_needed else '⚠️ Tight schedule — increase daily hours!'}
-                    </div>""", unsafe_allow_html=True)
-
-                    # Sort by priority: not started first, then in progress
-                    sorted_topics = sorted(pending,
-                                           key=lambda t: 0 if t["status"]=="Not Started" else 1)
-                    day = 1
-                    hrs_today = 0
-                    st.markdown("**Day-by-day breakdown:**")
-                    for t in sorted_topics:
-                        remaining_t = t["hours"]
-                        while remaining_t > 0:
-                            available = hrs_day - hrs_today
-                            if available <= 0:
-                                day += 1
-                                hrs_today = 0
-                                available = hrs_day
-                            chunk = min(remaining_t, available)
-                            st.markdown(f"""
-                            <div style='background:rgba(79,110,245,0.08);
-                                 border:1px solid rgba(79,110,245,0.2);
-                                 border-radius:8px;padding:0.6rem 1rem;
-                                 margin-bottom:4px;display:flex;
-                                 justify-content:space-between'>
-                                <span style='color:white'>
-                                    📅 Day {day} — <strong>{t['topic']}</strong>
-                                </span>
-                                <span style='color:#4F6EF5;font-weight:600'>
-                                    {chunk:.1f}h
-                                </span>
-                            </div>""", unsafe_allow_html=True)
-                            hrs_today    += chunk
-                            remaining_t  -= chunk
-
-            if st.button("🗑 Clear Topics", use_container_width=True):
-                st.session_state.syllabus[sel_subj] = []
-                st.rerun()
-        else:
-            st.info("No topics added yet. Add your syllabus topics above.")
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — QUIZ
-# ══════════════════════════════════════════════════════════════════════════════
-with tab6:
-    st.markdown("<div class='section-title'>🧠 Practice Quiz</div>",
-                unsafe_allow_html=True)
-    st.caption("Test your knowledge before the exam")
-
-    available_quiz_subjects = [
-        s["name"] for s in st.session_state.subjects
-        if s["name"] in QUIZ_BANK
-    ]
-
-    if not available_quiz_subjects:
-        st.info("Add subjects like Mathematics, Physics, Computer Science etc. to unlock quizzes.")
-    else:
-        quiz_subj = st.selectbox("Select Subject for Quiz", available_quiz_subjects)
-
-        if "quiz_state" not in st.session_state:
-            st.session_state.quiz_state = {
-                "questions": [], "answers": {}, "submitted": False, "score": 0
-            }
-
-        qs = st.session_state.quiz_state
-
-        # Start / reset quiz
-        if st.button("🔀 Start New Quiz", use_container_width=True):
-            pool = QUIZ_BANK.get(quiz_subj, [])
-            st.session_state.quiz_state = {
-                "questions": random.sample(pool, min(4, len(pool))),
-                "answers":   {},
-                "submitted": False,
-                "score":     0,
-                "subject":   quiz_subj,
-            }
-            st.rerun()
-
-        qs = st.session_state.quiz_state
-
-        if qs["questions"]:
-            if not qs["submitted"]:
-                st.markdown(f"**Subject: {qs.get('subject','')} · {len(qs['questions'])} questions**")
-                with st.form("quiz_form"):
-                    for i, q in enumerate(qs["questions"]):
-                        st.markdown(f"""
-                        <div class='quiz-card'>
-                            <div style='color:white;font-weight:600;margin-bottom:0.75rem'>
-                                Q{i+1}. {q['q']}
-                            </div>
-                        </div>""", unsafe_allow_html=True)
-                        ans = st.radio(f"",
-                                        q["options"],
-                                        key=f"q_{i}",
-                                        label_visibility="collapsed")
-                        qs["answers"][i] = ans
-
-                    if st.form_submit_button("✅ Submit Quiz", use_container_width=True):
-                        score = sum(
-                            1 for i, q in enumerate(qs["questions"])
-                            if qs["answers"].get(i) == q["answer"]
+                    with st.spinner(
+                        f"🧠 Generating {n_qs} questions from your PDF..."
+                    ):
+                        questions, err = generate_mcq_paper(
+                            pdf_text, q_subject, n_qs
                         )
-                        st.session_state.quiz_state["score"]     = score
-                        st.session_state.quiz_state["submitted"] = True
+
+                    if err:
+                        st.error(f"Error: {err}")
+                    elif questions:
+                        st.session_state.quiz_state = {
+                            "questions": questions,
+                            "answers":   {},
+                            "submitted": False,
+                            "score":     0,
+                            "source":    quiz_pdf.name,
+                        }
+                        st.success(
+                            f"✅ {len(questions)} questions generated!"
+                        )
                         st.rerun()
 
-            else:
-                # Results
-                score = qs["score"]
-                total = len(qs["questions"])
-                pct   = score / total * 100
+    else:
+        st.markdown("""
+        <div class='upload-box'>
+            <div style='font-size:2.5rem;margin-bottom:0.75rem'>🧠</div>
+            <div style='color:white;font-weight:600;margin-bottom:0.4rem'>
+                Upload PDF to generate questions
+            </div>
+            <div style='color:rgba(255,255,255,0.35);font-size:0.85rem'>
+                AI reads your material and creates exam-style MCQs
+            </div>
+        </div>""", unsafe_allow_html=True)
 
-                color = "#6EE7B7" if pct >= 75 else "#f59e0b" if pct >= 50 else "#f87171"
-                emoji = "🎉" if pct >= 75 else "👍" if pct >= 50 else "📚"
+    # ── Quiz UI ───────────────────────────────────────────────────────────────
+    if qs.get("questions"):
+        source = qs.get("source", "PDF")
+        st.markdown(
+            f"<div class='section-title'>"
+            f"📝 Question Paper — {len(qs['questions'])} Questions"
+            f"</div>",
+            unsafe_allow_html=True)
+        st.caption(f"Source: {source}")
 
-                st.markdown(f"""
-                <div class='pred-result'>
-                    <div style='font-size:3rem'>{emoji}</div>
-                    <div style='color:rgba(255,255,255,0.5);margin:0.5rem 0'>Quiz Score</div>
-                    <div style='font-size:3.5rem;font-weight:800;color:{color}'>
-                        {score}/{total}
-                    </div>
-                    <div style='color:rgba(255,255,255,0.6);margin-top:0.5rem'>
-                        {pct:.0f}% · {"Excellent!" if pct>=75 else "Good effort!" if pct>=50 else "Keep studying!"}
-                    </div>
-                </div>""", unsafe_allow_html=True)
-
-                # Answer review
-                st.markdown("<div class='section-title'>Answer Review</div>",
-                            unsafe_allow_html=True)
+        if not qs["submitted"]:
+            with st.form("mcq_form"):
                 for i, q in enumerate(qs["questions"]):
-                    user_ans    = qs["answers"].get(i, "")
-                    correct_ans = q["answer"]
-                    is_correct  = user_ans == correct_ans
-                    icon  = "✅" if is_correct else "❌"
-                    color2 = "#6EE7B7" if is_correct else "#f87171"
+                    diff_color = {
+                        "Easy":   "#6EE7B7",
+                        "Medium": "#f59e0b",
+                        "Hard":   "#f87171"
+                    }.get(q.get("difficulty","Medium"), "#a78bfa")
+
                     st.markdown(f"""
-                    <div style='background:rgba(255,255,255,0.03);
-                         border:1px solid {color2}44;border-radius:12px;
-                         padding:1rem;margin-bottom:0.75rem'>
-                        <div style='color:white;font-weight:600;margin-bottom:6px'>
-                            {icon} Q{i+1}. {q['q']}
+                    <div class='mcq-card'>
+                        <div style='display:flex;justify-content:space-between;
+                                    align-items:flex-start;margin-bottom:8px'>
+                            <div style='color:rgba(255,255,255,0.4);font-size:0.75rem'>
+                                📌 {q.get('topic','')}
+                            </div>
+                            <span style='background:{diff_color}22;
+                                  color:{diff_color};
+                                  border:1px solid {diff_color}44;
+                                  border-radius:99px;padding:2px 10px;
+                                  font-size:0.72rem;font-weight:600'>
+                                {q.get('difficulty','Medium')}
+                            </span>
                         </div>
-                        <div style='font-size:0.85rem'>
-                            <span style='color:rgba(255,255,255,0.5)'>Your answer: </span>
-                            <span style='color:{color2};font-weight:500'>{user_ans}</span>
+                        <div style='color:white;font-weight:600;font-size:1rem'>
+                            Q{i+1}. {q['q']}
                         </div>
-                        {"" if is_correct else f"<div style='font-size:0.85rem;margin-top:4px'><span style='color:rgba(255,255,255,0.5)'>Correct: </span><span style='color:#6EE7B7;font-weight:500'>{correct_ans}</span></div>"}
                     </div>""", unsafe_allow_html=True)
 
-                # Update session totals
-                st.session_state.quiz_score += score
-                st.session_state.quiz_total += total
+                    qs["answers"][i] = st.radio(
+                        f"Q{i+1}",
+                        q["options"],
+                        key=f"mcq_{i}",
+                        label_visibility="collapsed"
+                    )
 
-                if st.button("🔄 Try Again", use_container_width=True):
-                    st.session_state.quiz_state["submitted"] = False
+                if st.form_submit_button("✅ Submit Paper",
+                                          use_container_width=True):
+                    score = sum(
+                        1 for i, q in enumerate(qs["questions"])
+                        if qs["answers"].get(i) == q["answer"]
+                    )
+                    st.session_state.quiz_state["score"]     = score
+                    st.session_state.quiz_state["submitted"] = True
                     st.rerun()
-        else:
-            st.info("Click 'Start New Quiz' to begin!")
 
-        # Overall quiz stats
-        if st.session_state.quiz_total > 0:
-            overall = st.session_state.quiz_score / st.session_state.quiz_total * 100
-            st.markdown("---")
+        else:
+            # ── Results ───────────────────────────────────────────────────────
+            score = qs["score"]
+            total = len(qs["questions"])
+            pct   = score / total * 100
+            color = ("#6EE7B7" if pct >= 75
+                     else "#f59e0b" if pct >= 50
+                     else "#f87171")
+            emoji = "🎉" if pct >= 75 else "👍" if pct >= 50 else "📚"
+            msg   = ("Excellent! Great preparation!" if pct >= 75
+                     else "Good effort! Review wrong answers." if pct >= 50
+                     else "Keep studying — re-read the PDF and try again!")
+
             st.markdown(f"""
-            <div class='tip-box'>
-                📊 Overall Quiz Performance: <strong>{overall:.0f}%</strong>
-                ({st.session_state.quiz_score}/{st.session_state.quiz_total} correct)
+            <div style='background:linear-gradient(135deg,
+                        rgba(79,110,245,0.12),rgba(110,231,183,0.08));
+                 border:1px solid rgba(79,110,245,0.25);
+                 border-radius:24px;padding:2.5rem;text-align:center;
+                 margin:1rem 0'>
+                <div style='font-size:3.5rem'>{emoji}</div>
+                <div style='color:rgba(255,255,255,0.45);margin:0.5rem 0;
+                            font-size:0.9rem'>Your Score</div>
+                <div style='font-size:4rem;font-weight:800;color:{color};
+                            line-height:1'>{score}/{total}</div>
+                <div style='font-size:1.5rem;font-weight:700;color:{color};
+                            margin-top:0.25rem'>{pct:.0f}%</div>
+                <div style='color:rgba(255,255,255,0.5);margin-top:0.75rem'>
+                    {msg}
+                </div>
             </div>""", unsafe_allow_html=True)
 
+            # Stats row
+            easy_total  = sum(1 for q in qs["questions"]
+                              if q.get("difficulty") == "Easy")
+            med_total   = sum(1 for q in qs["questions"]
+                              if q.get("difficulty") == "Medium")
+            hard_total  = sum(1 for q in qs["questions"]
+                              if q.get("difficulty") == "Hard")
+            easy_score  = sum(
+                1 for i, q in enumerate(qs["questions"])
+                if q.get("difficulty") == "Easy"
+                and qs["answers"].get(i) == q["answer"]
+            )
+            med_score   = sum(
+                1 for i, q in enumerate(qs["questions"])
+                if q.get("difficulty") == "Medium"
+                and qs["answers"].get(i) == q["answer"]
+            )
+            hard_score  = sum(
+                1 for i, q in enumerate(qs["questions"])
+                if q.get("difficulty") == "Hard"
+                and qs["answers"].get(i) == q["answer"]
+            )
+
+            sc1, sc2, sc3 = st.columns(3)
+            for col, label, s, t, c in [
+                (sc1, "🟢 Easy",   easy_score, easy_total, "#6EE7B7"),
+                (sc2, "🟡 Medium", med_score,  med_total,  "#f59e0b"),
+                (sc3, "🔴 Hard",   hard_score, hard_total, "#f87171"),
+            ]:
+                with col:
+                    st.markdown(f"""
+                    <div class='card' style='text-align:center'>
+                        <div style='color:{c};font-weight:700;font-size:1.5rem'>
+                            {s}/{t}
+                        </div>
+                        <div style='color:rgba(255,255,255,0.4);font-size:0.8rem'>
+                            {label}
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+            # Answer review
+            st.markdown("<div class='section-title'>📋 Answer Review</div>",
+                        unsafe_allow_html=True)
+
+            for i, q in enumerate(qs["questions"]):
+                user_ans    = qs["answers"].get(i, "")
+                correct_ans = q["answer"]
+                is_correct  = user_ans == correct_ans
+                icon        = "✅" if is_correct else "❌"
+                bc          = "#6EE7B7" if is_correct else "#f87171"
+                diff_color  = {
+                    "Easy":   "#6EE7B7",
+                    "Medium": "#f59e0b",
+                    "Hard":   "#f87171"
+                }.get(q.get("difficulty","Medium"), "#a78bfa")
+
+                wrong_html = "" if is_correct else f"""
+                <div style='margin-top:6px;font-size:0.85rem'>
+                    <span style='color:rgba(255,255,255,0.4)'>Correct: </span>
+                    <span style='color:#6EE7B7;font-weight:600'>{correct_ans}</span>
+                </div>"""
+
+                explanation = q.get("explanation", "")
+                exp_html = f"""
+                <div style='margin-top:8px;background:rgba(79,110,245,0.08);
+                     border-radius:8px;padding:0.6rem 0.8rem;
+                     font-size:0.82rem;color:rgba(255,255,255,0.6)'>
+                    💡 {explanation}
+                </div>""" if explanation else ""
+
+                st.markdown(f"""
+                <div style='background:rgba(255,255,255,0.03);
+                     border:1px solid {bc}33;border-radius:14px;
+                     padding:1.1rem 1.25rem;margin-bottom:0.75rem'>
+                    <div style='display:flex;justify-content:space-between;
+                                margin-bottom:6px'>
+                        <span style='color:rgba(255,255,255,0.35);font-size:0.75rem'>
+                            📌 {q.get('topic','')}
+                        </span>
+                        <span style='color:{diff_color};font-size:0.75rem;
+                              font-weight:600'>
+                            {q.get('difficulty','')}
+                        </span>
+                    </div>
+                    <div style='color:white;font-weight:600;margin-bottom:8px'>
+                        {icon} Q{i+1}. {q['q']}
+                    </div>
+                    <div style='font-size:0.85rem'>
+                        <span style='color:rgba(255,255,255,0.4)'>Your answer: </span>
+                        <span style='color:{bc};font-weight:500'>{user_ans}</span>
+                    </div>
+                    {wrong_html}
+                    {exp_html}
+                </div>""", unsafe_allow_html=True)
+
+            # Action buttons
+            b1, b2 = st.columns(2)
+            with b1:
+                if st.button("🔄 Try Again", use_container_width=True):
+                    st.session_state.quiz_state = {
+                        "questions": qs["questions"],
+                        "answers": {}, "submitted": False,
+                        "score": 0, "source": qs["source"]
+                    }
+                    st.rerun()
+            with b2:
+                if st.button("📄 New PDF", use_container_width=True):
+                    st.session_state.quiz_state = {
+                        "questions": [], "answers": {},
+                        "submitted": False, "score": 0, "source": ""
+                    }
+                    st.rerun()
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div style='text-align:center;padding:2rem 0 1rem;color:rgba(255,255,255,0.2);font-size:0.8rem'>
-    StudyAI · Python · scikit-learn · Streamlit · Built for students 🎓
+<div style='text-align:center;padding:2rem 0 1rem;
+     color:rgba(255,255,255,0.15);font-size:0.8rem'>
+    StudyAI · Powered by Gemini AI · Built for students 🎓
 </div>""", unsafe_allow_html=True)
