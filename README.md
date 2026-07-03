@@ -13,7 +13,7 @@
 
 ## 🌐 Live Demo
 
-🔗 **[studyai.streamlit.app](https://your-username-study-planner-ai.streamlit.app)**
+🔗 **[studyai.streamlit.app](https://study-planner-ai-manvisharma.streamlit.app/)**
 
 ---
 
